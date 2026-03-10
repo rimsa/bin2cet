@@ -1,0 +1,158 @@
+diff --git a/src/e9patch/e9json.cpp b/src/e9patch/e9json.cpp
+index c3ed884..b702637 100644
+--- a/src/e9patch/e9json.cpp
++++ b/src/e9patch/e9json.cpp
+@@ -746,6 +746,8 @@ static Entry makeDataEntry(Parser &parser)
+                 entry.kind = ENTRY_REL8;
+             else if (strcmp(parser.s, "rel32") == 0)
+                 entry.kind = ENTRY_REL32;
++            else if (strcmp(parser.s, "reloc") == 0)
++                entry.kind = ENTRY_RELOC;
+             else
+                 goto type_error;
+             break;
+@@ -843,6 +845,37 @@ type_error:
+             }
+             break;
+         }
++        case ENTRY_RELOC:
++        {
++            expectToken(parser, '[');
++            std::vector<uint8_t> rbytes;
++            char tok = getToken(parser);
++            while (tok != ']') {
++                if (tok != TOKEN_NUMBER)
++                    parse_error(parser, "invalid token: %c\n", tok);
++
++                rbytes.push_back((uint8_t) parser.i);
++                tok = expectToken2(parser, ',', ']');
++                if (tok == ',')
++                    tok = getToken(parser);
++            }
++            entry.length = rbytes.size();
++            entry.bytes  = dupBytes(rbytes);
++
++            expectToken(parser, ',');
++            expectToken(parser, TOKEN_STRING);
++            if (strcmp(parser.s, "addr") != 0)
++                parse_error(parser, "expected \"addr\", found \"%s\"\n", parser.s);
++            expectToken(parser, ':');
++
++            tok = expectToken2(parser, TOKEN_NUMBER, TOKEN_STRING);
++            if (tok == TOKEN_NUMBER)
++                entry.orig_addr = (intptr_t) parser.i;
++            else
++                entry.orig_addr = stringToNumber(parser);
++
++            break;
++        }
+ 
+         default:
+             break;
+diff --git a/src/e9patch/e9patch.h b/src/e9patch/e9patch.h
+index 1dbebc0..e9f7af3 100644
+--- a/src/e9patch/e9patch.h
++++ b/src/e9patch/e9patch.h
+@@ -185,6 +185,7 @@ enum EntryKind
+     ENTRY_BREAK,
+     ENTRY_TAKE,
+     ENTRY_BATCH,
++    ENTRY_RELOC
+ };
+ 
+ /*
+@@ -209,6 +210,7 @@ struct Entry
+         uint32_t uint32;                // 32bit integer constant
+         uint64_t uint64;                // 64bit integer constant
+     };
++    intptr_t orig_addr;
+ };
+ 
+ /*
+diff --git a/src/e9patch/e9trampoline.cpp b/src/e9patch/e9trampoline.cpp
+index cc13440..287d291 100644
+--- a/src/e9patch/e9trampoline.cpp
++++ b/src/e9patch/e9trampoline.cpp
+@@ -437,6 +437,15 @@ static int getTrampolineSize(const Binary *B, const Trampoline *T,
+                         BUILD_SIZE);
+                 continue;
+             }
++            case ENTRY_RELOC:
++            {
++                off_t offset = 0; // offset=0 means "same place", just measure
++                int r = relocateInstr(entry.orig_addr, (int32_t)offset,
++                            entry.bytes, entry.length,
++                            /*pic=*/false, nullptr, /*relax=*/true);
++                size += (r < 0 ? entry.length : (unsigned)r);
++                continue;
++            }
+         }
+     }
+     return size;
+@@ -603,6 +612,15 @@ static size_t getTrampolineBounds(const Binary *B, const Trampoline *T,
+                         BUILD_SIZE);
+                 continue;
+             }
++            case ENTRY_RELOC:
++            {
++                off_t offset = 0; // offset=0 means "same place", just measure
++                int r = relocateInstr(entry.orig_addr, (int32_t)offset,
++                            entry.bytes, entry.length,
++                            /*pic=*/false, nullptr, /*relax=*/true);
++                size += (r < 0 ? entry.length : (unsigned)r);
++                continue;
++            }
+         }
+     }
+     return size;
+@@ -713,6 +731,15 @@ static intptr_t buildLabelSet(const Binary *B, const Trampoline *T,
+                         BUILD_SIZE, &breaks, nullptr);
+                 continue;
+             }
++            case ENTRY_RELOC:
++            {
++                off_t offset = 0; // offset=0 means "same place", just measure
++                int r = relocateInstr(entry.orig_addr, (int32_t)offset,
++                            entry.bytes, entry.length,
++                            /*pic=*/false, nullptr, /*relax=*/true);
++                addr += (r < 0 ? entry.length : (unsigned)r);
++                continue;
++            }
+         }
+     }
+     return addr;
+@@ -903,6 +930,18 @@ static void buildBytes(const Binary *B, const Trampoline *T, const Instr *I,
+                 I = nullptr;
+                 continue;
+             }
++            case ENTRY_RELOC:
++            {
++                intptr_t new_addr = addr + buf.size();
++                off_t offset = new_addr - entry.orig_addr;
++                int r = relocateInstr(entry.orig_addr, (int32_t)offset,
++                    entry.bytes, entry.length,
++                    /*pic=*/false, &buf, /*relax=*/false);
++                if (r < 0)
++                    buf.push(entry.bytes, entry.length); // fallback: emit as-is
++
++                continue;
++            }
+         }
+     }
+ }
+@@ -1038,6 +1077,15 @@ bool TrampolineCmp::operator()(const Trampoline *a, const Trampoline *b) const
+                 if (entry_a->uint64 != entry_b->uint64)
+                     return (entry_a->uint64 < entry_b->uint64);
+                 break;
++            case ENTRY_RELOC:
++                if (entry_a->length != entry_b->length)
++                    return (entry_a->length < entry_b->length);
++                cmp = memcmp(entry_a->bytes, entry_b->bytes, entry_a->length);
++                if (cmp != 0)
++                    return (cmp < 0);
++                if (entry_a->orig_addr != entry_b->orig_addr)
++                    return (entry_a->orig_addr < entry_b->orig_addr);
++                break;
+         }
+     }
+     return false;
