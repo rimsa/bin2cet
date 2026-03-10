@@ -1,0 +1,12 @@
+*.o
+*.so
+*.dSYM
+*.log
+/tests/*.json
+/tests/*.patched
+/tests/*.rpc
+/tests/*.tmp
+/tests/calc
+/tests/figures
+/contrib/*
+/ghidra-project
