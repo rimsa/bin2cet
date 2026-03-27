@@ -40,6 +40,14 @@ Install the following prerequisities:
         $ rm ghidra_11.0.3_PUBLIC_20240410.zip
         $ cd ..
 
+4) ***OPTIONAL***: Pin (https://www.intel.com/content/www/us/en/developer/articles/tool/pin-a-dynamic-binary-instrumentation-tool.html)
+
+        $ cd contrib
+        $ wget -qO - 'https://software.intel.com/sites/landingpage/pintool/downloads/pin-external-4.2-99776-g21d818fa2-gcc-linux.tar.gz' | tar zxv
+        $ cd ../checker
+        $ make PIN_ROOT=../contrib/pin-external-4.2-99776-g21d818fa2-gcc-linux
+        $ cd ..
+
 ## Running
 
 1) First, load the environment to use the auxiliary tools.
@@ -60,6 +68,14 @@ Install the following prerequisities:
 
         $ python3 bin2cet.py --keep --verbose tests/figures tests/figures.json tests/figures.patched
         $ ./tests/figures.patched 4 5 'rectangle'
+
+4) ***OPTIONAL***: Test with the cetchecker Pin tool (original and patched).
+
+        $ pin -t checker/obj-intel64/cetchecker.so -c -v 2 -- ./tests/calc 7 '*' 3
+        $ pin -t checker/obj-intel64/cetchecker.so -c -v 2 -- ./tests/calc.patched 7 '*' 3
+
+        $ pin -t checker/obj-intel64/cetchecker.so -c -v 2 -- ./tests/figures 4 5 'rectangle'
+        $ pin -t checker/obj-intel64/cetchecker.so -c -v 2 -- ./tests/figures.patched 4 5 'rectangle'
 
 ## Troubleshooting
 
