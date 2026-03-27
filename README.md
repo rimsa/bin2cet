@@ -28,6 +28,7 @@ Install the following prerequisities:
         $ git clone https://github.com/GJDuck/e9patch.git
         $ cd e9patch
         $ patch -p1 < ../../e9reloc.patch
+        $ patch -p1 < ../../e9cet.patch
         $ ./build.sh
         $ cd ../..
 
@@ -48,8 +49,8 @@ Install the following prerequisities:
 2) Then, run ghidra with binanalyzer to extract binary information of the desired program(s).
 
         $ mkdir ghidra-project
-        $ analyzeHeadless ghidra-project analyzer -import ./tests/calc -postScript ./binanalyzer.py
-        $ analyzeHeadless ghidra-project analyzer -import ./tests/figures -postScript ./binanalyzer.py
+        $ analyzeHeadless ghidra-project analyzer -import ./tests/calc -postScript ./analyzer/binanalyzer.py
+        $ analyzeHeadless ghidra-project analyzer -import ./tests/figures -postScript ./analyzer/binanalyzer.py
         $ rm -rf ghidra-project
 
 3) Finally, patch the binary to make it CET compatible.

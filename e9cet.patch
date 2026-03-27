@@ -1,0 +1,88 @@
+diff -urN a/src/e9patch/e9elf.cpp b/src/e9patch/e9elf.cpp
+--- a/src/e9patch/e9elf.cpp	2026-03-27 11:04:00.907671964 -0300
++++ b/src/e9patch/e9elf.cpp	2026-03-27 11:09:21.034971251 -0300
+@@ -662,6 +662,8 @@ size_t emitElf(Binary *B, const MappingSet &mappings, size_t mapping_size)
+         data[size++] = 0x00;
+     }
+
+     intptr_t entry = (option_loader_base + (size - config_offset));
++    // endbr64
++    data[size++] = 0xf3; data[size++] = 0x0f; data[size++] = 0x1e; data[size++] = 0xfa;
+     if (option_trap_entry)
+         data[size++] = /*int3=*/0xCC;
+diff -urN a/src/e9patch/e9loader_elf.cpp b/src/e9patch/e9loader_elf.cpp
+--- a/src/e9patch/e9loader_elf.cpp	2026-03-27 11:04:00.907671964 -0300
++++ b/src/e9patch/e9loader_elf.cpp	2026-03-27 11:07:50.892911682 -0300
+@@ -78,12 +78,12 @@
+     "\tpop %rdx\n"
+     "\tpop %rsi\n"
+     "\tpop %rdi\n"
+-    "\tjmpq *%rax\n"
++    "\tnotrack jmpq *%rax\n"
+ 
+     ".align 16\n"       // _fini() offset = +16
+     "_fini:\n"
+     "\tcallq e9fini\n"
+-    "\tjmpq *%rax\n"
++    "\tnotrack jmpq *%rax\n"
+ 
+     ".align 8\n"        // _handler() offset = +24
+     "_handler:\n"
+@@ -279,7 +279,7 @@
+         "mov 0x78(%%rbx),%%rsp\n"
+         "mov 0x70(%%rbx),%%rcx\n"
+         "mov 0x58(%%rbx),%%rbx\n"
+-        "jmpq *%%fs:0x40\n"                     // Jump to trampoline
++        ".byte 0x3e; jmpq *%%fs:0x40\n"         // Jump to trampoline
+             : : "b"(mctx), "c"(trampoline), "S"(xstate));
+     __builtin_unreachable();
+ }
+diff -urN a/src/e9patch/e9loader_pe.cpp b/src/e9patch/e9loader_pe.cpp
+--- a/src/e9patch/e9loader_pe.cpp	2026-03-27 11:04:00.907671964 -0300
++++ b/src/e9patch/e9loader_pe.cpp	2026-03-27 11:05:50.878174337 -0300
+@@ -281,7 +281,7 @@
+     "\tpop %rdx\n"
+     "\tpop %rcx\n"
+ 
+-    "\tjmpq *%rax\n"
++    "\tnotrack jmpq *%rax\n"
+ 
+     ".section .text\n"
+ );
+diff -urN a/src/e9patch/e9patch.cpp b/src/e9patch/e9patch.cpp
+--- a/src/e9patch/e9patch.cpp	2026-03-27 11:04:00.907671964 -0300
++++ b/src/e9patch/e9patch.cpp	2026-03-27 11:05:39.549916280 -0300
+@@ -926,7 +926,7 @@
+     "movabs $(realMain-main)-0x14159265, %rax\n"
+     "leaq main+0x6b1db77(%rip), %rbp\n"
+     "leaq 0xd63b6ee(%rbp, %rax), %rax\n"
+-    "ds jmpq *%rax\n"
++    "notrack jmpq *%rax\n"
+ 
+     /*
+      * Test #3: Dynamically calculated jump target:
+@@ -943,7 +943,7 @@
+     "lea 4(%r10,%rax),%rax\n"
+     "cmp $255,%rax\n"
+     "jle .Lskip\n"
+-    "ds jmp *%rax\n"
++    "notrack jmp *%rax\n"
+     ".Lskip:\n"
+ );
+ 
+diff -urN a/src/e9tool/e9frontend.cpp b/src/e9tool/e9frontend.cpp
+--- a/src/e9tool/e9frontend.cpp	2026-03-27 11:04:00.911672055 -0300
++++ b/src/e9tool/e9frontend.cpp	2026-03-27 11:06:25.638966554 -0300
+@@ -1980,9 +1980,9 @@
+             fprintf(out, "%u,", (result_rax? 0x58: 0x59));
+             fprintf(out, "\"$RSTOR_RSP@%s\",", patch);
+ 
+-            // jmpq *%fs:0x40
+-            fprintf(out, "%u,%u,%u,%u,{\"int32\":%d},",
+-                0x64, 0xff, 0x24, 0x25, tls_offset);
++            // notrack jmpq *%fs:0x40
++            fprintf(out, "%u,%u,%u,%u,%u,{\"int32\":%d},",
++                0x3e, 0x64, 0xff, 0x24, 0x25, tls_offset);
+         }
+         else
+         {
