@@ -71,11 +71,11 @@ Install the following prerequisities:
 
 4) ***OPTIONAL***: Test with the cetchecker Pin tool (original and patched).
 
-        $ pin -t checker/obj-intel64/cetchecker.so -c -v 2 -- ./tests/calc 7 '*' 3
-        $ pin -t checker/obj-intel64/cetchecker.so -c -v 2 -- ./tests/calc.patched 7 '*' 3
+        $ pin -t checker/obj-intel64/cetchecker.so -c -v 3 -- ./tests/calc 7 '*' 3
+        $ pin -t checker/obj-intel64/cetchecker.so -c -v 3 -- ./tests/calc.patched 7 '*' 3
 
-        $ pin -t checker/obj-intel64/cetchecker.so -c -v 2 -- ./tests/figures 4 5 'rectangle'
-        $ pin -t checker/obj-intel64/cetchecker.so -c -v 2 -- ./tests/figures.patched 4 5 'rectangle'
+        $ pin -t checker/obj-intel64/cetchecker.so -c -v 3 -- ./tests/figures 4 5 'rectangle'
+        $ pin -t checker/obj-intel64/cetchecker.so -c -v 3 -- ./tests/figures.patched 4 5 'rectangle'
 
 ## Troubleshooting
 

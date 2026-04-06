@@ -22,9 +22,11 @@
 #include <sstream>
 #include <iomanip>
 #include <string>
+#include <cstdio>
 
 static KNOB<BOOL> KnobContinue(KNOB_MODE_WRITEONCE, "pintool", "c", "0", "Continue analysis (Do not abort on first error)");
-static KNOB<UINT32> KnobVerbose(KNOB_MODE_WRITEONCE, "pintool", "v", "0", "Verbose level (0-2)");
+static KNOB<UINT32> KnobVerbose(KNOB_MODE_WRITEONCE, "pintool", "v", "0", "Verbose level (0-3)");
+static KNOB<std::string> KnobLogFile(KNOB_MODE_WRITEONCE, "pintool", "l", "", "specify log file name");
 
 static USIZE no_endbr_count = 0;
 
@@ -34,6 +36,29 @@ static USIZE no_endbr_count = 0;
 #define ENDBR_INSTR_SIZE 4
 uint8_t endbr32[ENDBR_INSTR_SIZE] = { 0xF3, 0x0F, 0x1E, 0xFB };
 uint8_t endbr64[ENDBR_INSTR_SIZE] = { 0xF3, 0x0F, 0x1E, 0xFA };
+
+std::string program = "[program]";
+
+VOID dump_log(const std::string& msg) {
+	std::string filename = KnobLogFile.Value();
+	if (filename != "") {
+		int fd = open(filename.c_str(), O_WRONLY|O_APPEND|O_CREAT, 0644);
+		assert(fd > 0);
+
+		write(fd, msg.c_str(), msg.length());
+		close(fd);
+	}
+}
+
+VOID fatal() {
+	std::stringstream ss;
+	ss << program
+		<< " executed "
+		<< no_endbr_count
+		<< " indirect jumps/calls without endbr."
+		<< std::endl;
+	PIN_ERROR(ss.str());
+}
 
 BOOL is_ins_notrack(INS ins) {
 	xed_decoded_inst_t* xedd = INS_XedDec(ins);
@@ -48,6 +73,28 @@ BOOL is_addr_endbr(ADDRINT addr) {
 
 	return (memcmp(buf, endbr32, ENDBR_INSTR_SIZE) == 0 ||
 			memcmp(buf, endbr64, ENDBR_INSTR_SIZE) == 0);
+}
+
+std::string function_name(ADDRINT addr) {
+	PIN_LockClient();
+
+	RTN rtn = RTN_FindByAddress(addr);
+	std::string funcName = RTN_Valid(rtn) ?
+		PIN_UndecorateSymbolName(RTN_Name(rtn), UNDECORATION_COMPLETE) :
+		"unknown";
+
+	INT32 line = 0;
+	std::string fileName;
+	PIN_GetSourceLocation(addr, NULL, &line, &fileName);
+
+	PIN_UnlockClient();
+
+	std::stringstream ss;
+	ss << funcName;
+	if (line > 0)
+		ss << "{" << fileName << ":" << line << "}";
+
+	return ss.str();
 }
 
 std::string disassemble_address(ADDRINT addr) {
@@ -70,29 +117,42 @@ std::string disassemble_address(ADDRINT addr) {
 	return std::string(disasm);
 }
 
-VOID checkendbr(ADDRINT srcAddr, ADDRINT dstAddr) {
+VOID check_endbr(ADDRINT srcAddr, ADDRINT dstAddr) {
 	if (!is_addr_endbr(dstAddr)) {
 		no_endbr_count++;
 
-		if (!KnobContinue.Value() || KnobVerbose.Value() > 0) {
+		if (KnobVerbose.Value() >= 1) {
 			std::stringstream ss;
 			ss << std::hex
 				<< "indirect target without endbr: 0x"
 				<< srcAddr;
-			if (KnobVerbose.Value() > 1)
-				ss << " (" << disassemble_address(srcAddr) << ")";
+			if (KnobVerbose.Value() >= 2) {
+				ss << " (" << disassemble_address(srcAddr);
+				if (KnobVerbose.Value() >= 3)
+					ss << " @" << function_name(srcAddr);
+				ss << ")";
+			}
 			ss << " -> 0x" << dstAddr;
-			if (KnobVerbose.Value() > 1)
-				ss << " (" << disassemble_address(dstAddr) << ")";
+			if (KnobVerbose.Value() >= 2) {
+				ss << " (" << disassemble_address(dstAddr);
+				if (KnobVerbose.Value() >= 3)
+					ss << " @" << function_name(dstAddr);
+				ss << ")";
+			}
 			ss << std::endl;
 
-			if (!KnobContinue.Value())
-				PIN_ERROR(ss.str());
-			else
-				std::cerr
-					<< "*** " << ss.str();
+			std::cerr << "*** " << ss.str();
+			dump_log(ss.str());
 		}
+
+		if (!KnobContinue.Value())
+			fatal();
 	}
+}
+
+VOID ImageLoad(IMG img, VOID* v) {
+	if (IMG_IsMainExecutable(img))
+		program = IMG_Name(img);
 }
 
 VOID Instrument(INS ins, VOID *v) {
@@ -106,21 +166,15 @@ VOID Instrument(INS ins, VOID *v) {
 	INS_InsertCall(
 		ins,
 		IPOINT_TAKEN_BRANCH,
-		(AFUNPTR) checkendbr,
+		(AFUNPTR) check_endbr,
 		IARG_ADDRINT, INS_Address(ins),	// source address
 		IARG_BRANCH_TARGET_ADDR,		// destination address
 		IARG_END);
 }
 
 VOID Fini(INT32 code, VOID* v) {
-	if (no_endbr_count > 0) {
-		std::stringstream ss;
-		ss << "program executed "
-		   << no_endbr_count
-		   << " indirect jumps/calls without endbr."
-		   << std::endl;
-		PIN_ERROR(ss.str());
-	}
+	if (no_endbr_count > 0)
+		fatal();
 }
 
 int main(int argc, char *argv[]) {
@@ -132,6 +186,7 @@ int main(int argc, char *argv[]) {
 	}
 
 	PIN_AddFiniFunction(Fini, 0);
+	IMG_AddInstrumentFunction(ImageLoad, 0);
 	INS_AddInstrumentFunction(Instrument, 0);
 
 	PIN_StartProgram();
