@@ -70,8 +70,11 @@ def apply_lief(input_name, output_name):
         if patch['patch_type'] != 'target_address':
             continue
 
-        # Check if we are in the right section and within bounds.
-        assert patch['data']['section'] == '.text'
+        # For now, we only support patching the text section.
+        if patch['data']['section'] != '.text':
+            continue
+
+        # Check if we are within section bounds.
         section_offset = patch['data']['section_offset']
         assert section_offset >= 0 and section_offset < section.size
 
@@ -158,6 +161,9 @@ def apply_e9patch(input_name, output_rpc, output_name):
                     for instr in instructions:
                         bytes = str(instr['content']).replace(' ', '')[1:-1]
                         assert len(bytes) > 0
+
+                        if instr['indirect']:
+                            bytes = '62,' + bytes
 
                         if instr['relative']:
                             content += f'{{"reloc":[{bytes}],"addr":"{hex(current_addr)}"}},'

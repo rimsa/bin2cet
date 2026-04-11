@@ -33,6 +33,8 @@ listing = currentProgram.getListing()
 imgbase = currentProgram.getImageBase()
 funmanager = currentProgram.getFunctionManager()
 
+addrs_blacklist = set()
+
 def get_relative_addr(addr):
 	return (addr.subtract(imgbase) if imgbase.getOffset() == PIE_IMAGE_BASE else addr.getOffset())
 
@@ -43,6 +45,10 @@ def get_file_offset(addr):
 def get_addr_content(addr):
 	content = list(listing.getCodeUnitAt(addr).getBytes())
 	return [val if val >= 0 else (val + 256) for val in content]
+
+def is_instr_indirect_jump(instr):
+	return instr.getMnemonicString() == "JMP" and \
+			any(pcode.getOpcode() == PcodeOp.BRANCHIND for pcode in instr.getPcode())
 
 def extract_indirect_jump(instr):
 	addr = instr.getAddress()
@@ -66,57 +72,60 @@ def extract_indirect_jump(instr):
 	}
 
 def extract_function_entry(instr, fun):
-	addr = instr.getAddress()
-
-	# Ignore if the function already starts with ENDBR64.
-	if instr.getMnemonicString() == "ENDBR64":
-		return None
-
-	# Ignore if the function is outside the .text section.
-	section = memory.getBlock(addr)
-	if not section or section.getName() != ".text":
+	# Ignore if the function is outside of a section.
+	entry_addr = instr.getAddress()
+	section = memory.getBlock(entry_addr)
+	if not section:
 		return None
 
 	# Check if the entry address is part of a basic block.
-	basic_block = sbm.getCodeBlockAt(addr, monitor)
+	basic_block = sbm.getCodeBlockAt(entry_addr, monitor)
 	if not basic_block:
 		return None
+
+	blacklist = set()
 
 	current = instr
 	instructions = []
 	size = 0
 	while size < len(ENDBR64):
 		# Constantly check if the address belongs to this basic block.
-		if not basic_block.contains(current.getAddress()):
+		addr = current.getAddress()
+		if not basic_block.contains(addr):
 			return None
 
-		content = get_addr_content(current.getAddress())
+		blacklist.add(addr)
+		content = get_addr_content(addr)
 		instructions.append({
 			"content": content,
 			"asm": current.toString(),
-			"relative": True
+			"relative": True,
+			"indirect": is_instr_indirect_jump(current)
 		})
 		size += len(content)
 		current = current.getNext()
 
 	# The next instruction will be patched too,
-	# So let's check if it also belongs to the basic block.
-	if not basic_block.contains(current.getAddress()):
-		return None
-
+	# but there is no need to check if it belongs
+	# to the current basic block, since this
+	# instruction will be replaced by e9patch.
+	addr = current.getAddress()
+	blacklist.add(addr)
 	instructions.append({
-		"content": get_addr_content(current.getAddress()),
+		"content": get_addr_content(addr),
 		"asm": current.toString(),
-		"relative": True
+		"relative": True,
+		"indirect": is_instr_indirect_jump(current)
 	})
 
+	addrs_blacklist.update(blacklist)
 	return {
-		'addr': hex(get_relative_addr(addr)),
+		'addr': hex(get_relative_addr(entry_addr)),
 		'patch_type': 'target_address',
 		'data': {
 			'section': section.getName(),
-			'section_offset': addr.subtract(section.getStart()),
-			'file_offset': get_file_offset(addr),
+			'section_offset': entry_addr.subtract(section.getStart()),
+			'file_offset': get_file_offset(entry_addr),
 			'function': fun.getName(),
 			'instructions': instructions
 		}
@@ -124,23 +133,26 @@ def extract_function_entry(instr, fun):
 
 all = []
 for instr in listing.getInstructions(True):
-	if instr.getMnemonicString() == "JMP" and \
-			any(pcode.getOpcode() == PcodeOp.BRANCHIND for pcode in instr.getPcode()):
+	if instr.getAddress() in addrs_blacklist:
+		continue
+
+	if is_instr_indirect_jump(instr):
 		dump = extract_indirect_jump(instr)
 		if dump:
 			all.append(dump)
-		continue
-
-	fun = funmanager.getFunctionAt(instr.getAddress())
-	if fun:
-		dump = extract_function_entry(instr,fun)
-		if dump:
-			all.append(dump)
-		continue
+	else:
+		fun = funmanager.getFunctionAt(instr.getAddress())
+		if fun and instr.getMnemonicString() != "ENDBR64":
+			dump = extract_function_entry(instr, fun)
+			if dump:
+				all.append(dump)
+			else:
+				print("failed to extract function: %s" % fun.getName())
 
 args = getScriptArgs()
 if len(args) >= 2:
 	print('Usage: analyzer.py [Output extension]')
+	sys.exit(1)
 ext = args[0] if len(args) == 1 else 'json'
 
 # Open a file in write mode ('w') and dump the data
