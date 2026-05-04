@@ -47,8 +47,16 @@ def get_addr_content(addr):
 	return [val if val >= 0 else (val + 256) for val in content]
 
 def is_instr_indirect_jump(instr):
-	return instr.getMnemonicString() == "JMP" and \
+	return instr.getMnemonicString() == 'JMP' and \
 			any(pcode.getOpcode() == PcodeOp.BRANCHIND for pcode in instr.getPcode())
+
+def is_instr_direct_divert_flow(instr):
+	for pcode in instr.getPcode():
+		if pcode.getOpcode() == PcodeOp.BRANCH or \
+			pcode.getOpcode() == PcodeOp.CBRANCH or \
+			pcode.getOpcode() == PcodeOp.RETURN:
+			return True
+	return False
 
 def extract_indirect_jump(instr):
 	addr = instr.getAddress()
@@ -91,16 +99,16 @@ def extract_function_entry(instr, fun):
 	while size < len(ENDBR64):
 		# Constantly check if the address belongs to this basic block.
 		addr = current.getAddress()
-		if not basic_block.contains(addr):
+		if not basic_block.contains(addr) or is_instr_direct_divert_flow(current):
 			return None
 
 		blacklist.add(addr)
 		content = get_addr_content(addr)
 		instructions.append({
-			"content": content,
-			"asm": current.toString(),
-			"relative": True,
-			"indirect": is_instr_indirect_jump(current)
+			'content': content,
+			'asm': current.toString(),
+			'relative': True,
+			'indirect': is_instr_indirect_jump(current)
 		})
 		size += len(content)
 		current = current.getNext()
@@ -109,13 +117,17 @@ def extract_function_entry(instr, fun):
 	# but there is no need to check if it belongs
 	# to the current basic block, since this
 	# instruction will be replaced by e9patch.
+	# Only check if it may diverge flow:
+	if is_instr_direct_divert_flow(current):
+		return None
+
 	addr = current.getAddress()
 	blacklist.add(addr)
 	instructions.append({
-		"content": get_addr_content(addr),
-		"asm": current.toString(),
-		"relative": True,
-		"indirect": is_instr_indirect_jump(current)
+		'content': get_addr_content(addr),
+		'asm': current.toString(),
+		'relative': True,
+		'indirect': is_instr_indirect_jump(current)
 	})
 
 	addrs_blacklist.update(blacklist)
@@ -131,7 +143,18 @@ def extract_function_entry(instr, fun):
 		}
 	}
 
-all = []
+args = getScriptArgs()
+if len(args) >= 2:
+	print('Usage: analyzer.py [Output extension]')
+	sys.exit(1)
+ext = args[0] if len(args) == 1 else 'json'
+
+patches = []
+stats = {
+	'extracted': 0,
+	'total': 0
+}
+
 for instr in listing.getInstructions(True):
 	if instr.getAddress() in addrs_blacklist:
 		continue
@@ -139,23 +162,24 @@ for instr in listing.getInstructions(True):
 	if is_instr_indirect_jump(instr):
 		dump = extract_indirect_jump(instr)
 		if dump:
-			all.append(dump)
+			patches.append(dump)
 	else:
 		fun = funmanager.getFunctionAt(instr.getAddress())
-		if fun and instr.getMnemonicString() != "ENDBR64":
+		if fun and instr.getMnemonicString() != 'ENDBR64':
+			stats['total'] += 1
 			dump = extract_function_entry(instr, fun)
 			if dump:
-				all.append(dump)
+				stats['extracted'] += 1
+				patches.append(dump)
 			else:
-				print("failed to extract function: %s" % fun.getName())
-
-args = getScriptArgs()
-if len(args) >= 2:
-	print('Usage: analyzer.py [Output extension]')
-	sys.exit(1)
-ext = args[0] if len(args) == 1 else 'json'
+				print('Failed to extract function: %s' % fun.getName())
 
 # Open a file in write mode ('w') and dump the data
 outfile = currentProgram.getExecutablePath() + '.' + ext
-with open(outfile, "w") as json_file:
-    json.dump(all, json_file, indent=2)
+with open(outfile, 'w') as json_file:
+    json.dump(patches, json_file, indent=2)
+
+if stats['extracted'] > 0:
+	print('Total extracted functions: %d/%d (%.02f%%)' % (stats['extracted'], stats['total'], (float(stats['extracted']) / stats['total'] * 100)))
+else:
+	print('No functions extracted')
