@@ -24,9 +24,10 @@
 #include <string>
 #include <cstdio>
 
-static KNOB<BOOL> KnobContinue(KNOB_MODE_WRITEONCE, "pintool", "c", "0", "Continue analysis (Do not abort on first error)");
-static KNOB<UINT32> KnobVerbose(KNOB_MODE_WRITEONCE, "pintool", "v", "0", "Verbose level (0-3)");
-static KNOB<std::string> KnobLogFile(KNOB_MODE_WRITEONCE, "pintool", "l", "", "specify log file name");
+static KNOB<BOOL>        KnobContinue(KNOB_MODE_WRITEONCE, "pintool", "c", "0", "Continue analysis (Do not abort on first error)");
+static KNOB<UINT32>      KnobVerbose (KNOB_MODE_WRITEONCE, "pintool", "v", "0", "Verbose level (0-3)");
+static KNOB<std::string> KnobLogFile (KNOB_MODE_WRITEONCE, "pintool", "l", "", "specify log file name");
+static KNOB<BOOL>        KnobStats   (KNOB_MODE_WRITEONCE, "pintool", "s", "0", "Show statistics");
 
 static USIZE no_endbr_count = 0;
 
@@ -38,27 +39,6 @@ uint8_t endbr32[ENDBR_INSTR_SIZE] = { 0xF3, 0x0F, 0x1E, 0xFB };
 uint8_t endbr64[ENDBR_INSTR_SIZE] = { 0xF3, 0x0F, 0x1E, 0xFA };
 
 std::string program = "[program]";
-
-VOID dump_log(const std::string& msg) {
-	std::string filename = KnobLogFile.Value();
-	if (filename != "") {
-		int fd = open(filename.c_str(), O_WRONLY|O_APPEND|O_CREAT, 0644);
-		assert(fd > 0);
-
-		write(fd, msg.c_str(), msg.length());
-		close(fd);
-	}
-}
-
-VOID fatal() {
-	std::stringstream ss;
-	ss << program
-		<< " executed "
-		<< no_endbr_count
-		<< " indirect jumps/calls without endbr."
-		<< std::endl;
-	PIN_ERROR(ss.str());
-}
 
 BOOL is_ins_notrack(INS ins) {
 	xed_decoded_inst_t* xedd = INS_XedDec(ins);
@@ -141,12 +121,22 @@ VOID check_endbr(ADDRINT srcAddr, ADDRINT dstAddr) {
 			}
 			ss << std::endl;
 
-			std::cerr << "*** " << ss.str();
-			dump_log(ss.str());
+			// Show the message to the log or to the screen.
+			std::string filename = KnobLogFile.Value();
+			if (filename != "") {
+				int fd = open(filename.c_str(), O_WRONLY|O_APPEND|O_CREAT, 0644);
+				assert(fd > 0);
+
+				const std::string& msg = ss.str();
+				write(fd, msg.c_str(), msg.length());
+				close(fd);
+			} else {
+				std::cerr << "*** " << ss.str();
+			}
 		}
 
 		if (!KnobContinue.Value())
-			fatal();
+			PIN_ERROR("indirect target without endbr");
 	}
 }
 
@@ -173,8 +163,14 @@ VOID Instrument(INS ins, VOID *v) {
 }
 
 VOID Fini(INT32 code, VOID* v) {
-	if (no_endbr_count > 0)
-		fatal();
+	if (KnobStats.Value() && no_endbr_count > 0) {
+		std::cerr
+			<< program
+			<< " executed "
+			<< no_endbr_count
+			<< " indirect jumps/calls without endbr."
+			<< std::endl;
+	}
 }
 
 int main(int argc, char *argv[]) {
