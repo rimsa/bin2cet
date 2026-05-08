@@ -76,25 +76,29 @@ def extract_instructions(input, sections):
 				bytes = [int(n, 16) for n in match.group(2).split()]
 				asm = re.sub(' +', ' ', match.group(4))
 				indirect = re.search(r'^[^\s]+\s*\*', asm) is not None
-				relative = re.search(r'(%[er]ip)', asm) is not None
 
 				instructions.append({
 					'address': addr,
 					'bytes': bytes,
 					'asm': asm,
-					'indirect': indirect,
-					'relative': relative
+					'indirect': indirect
 				})
 				continue
 
 def dump_json(sections, output):
 	def is_instr_direct_divert_flow(asm):
-		return re.search(r'^ret|j\w+\s+[^*]', asm) is not None
+		return re.search(r'^(ret|j\w+|call)', asm) is not None
 
 	patches = []
 	stats = {
-		'extracted': 0,
-		'total': 0
+		'indirect_control_transfers': {
+			'jumps': 0,
+			'calls': 0,
+		},
+		'function_entries': {
+			'extracted': 0,
+			'total': 0
+		}
 	}
 
 	for sect_name in sections:
@@ -117,11 +121,11 @@ def dump_json(sections, output):
 			instr_idx = 0
 			instr_count = len(function['instructions'])
 
-			# Check if we can have a target_address/function patch out side of the plt section.
+			# Check if we can have a function entry patch outside of the plt section.
 			if 'plt' not in sect_name and \
 					function['instructions'][instr_idx]['bytes'] != ENDBR64:
 
-				stats['total'] += 1
+				stats['function_entries']['total'] += 1
 				patch = None
 
 				if fn_size > len(ENDBR64):
@@ -134,25 +138,19 @@ def dump_json(sections, output):
 
 						instructions.append({
 							'asm': instr['asm'],
-							'content': instr['bytes'],
-							'indirect': instr['indirect'],
-							'relative': instr['relative']
+							'content': instr['bytes']
 						})
 						instr_idx += 1
 						block_size += len(instr['bytes'])
 
-					# Check if the next instruction is within bounds and
-					# it is not an instruction that diverts flow.
+					# Check if the next instruction is within bounds.
 					if block_size >= len(ENDBR64) and \
-							instr_idx < instr_count and \
-							not is_instr_direct_divert_flow(function['instructions'][instr_idx]['asm']):
+							instr_idx < instr_count:
 						# The next instruction will also be added to be patched.
 						instr = function['instructions'][instr_idx]
 						instructions.append({
 							'asm': instr['asm'],
-							'content': instr['bytes'],
-							'indirect': instr['indirect'],
-							'relative': instr['relative']
+							'content': instr['bytes']
 						})
 						instr_idx += 1
 						block_size += len(instr['bytes'])
@@ -163,7 +161,7 @@ def dump_json(sections, output):
 							fn_file_offset = sect_fileoffset + fn_sect_offset
 
 							patch = {
-								'patch_type': 'target_address',
+								'patch_type': 'indirect_branch_target',
 								'addr': hex(fn_entry),
 								'data': {
 									'function': fn_name,
@@ -176,7 +174,7 @@ def dump_json(sections, output):
 					
 				# If a patch was created, added to the list.
 				if patch:
-					stats['extracted'] += 1
+					stats['function_entries']['extracted'] += 1
 					patches.append(patch)
 				# Otherwise, ignore this function and start from scratch.
 				else:
@@ -185,13 +183,19 @@ def dump_json(sections, output):
 
 			while instr_idx < instr_count:
 				instr = function['instructions'][instr_idx]
-				if instr['indirect'] and 'jmp' in instr['asm']:
+				if instr['indirect'] and re.search(r'jmp|call', instr['asm']):
 					instr_addr = instr['address']
 					fn_sect_offset = instr['address'] - sect_start
 					fn_file_offset = sect_fileoffset + fn_sect_offset
 
+					ptype = 'indirect_jump' if 'jmp' in instr['asm'] else 'indirect_call'
+					if ptype == 'indirect_jump':
+						stats['indirect_control_transfers']['jumps'] += 1
+					else:
+						stats['indirect_control_transfers']['calls'] += 1
+
 					patch = {
-						'patch_type': 'indirect_jump',
+						'patch_type': ptype,
 						'addr': hex(instr_addr),
 						'data': {
 							'function': fn_name,
@@ -210,10 +214,13 @@ def dump_json(sections, output):
 	with open(output, 'w') as json_file:
 		json.dump(patches, json_file, indent=2)
 
-	if stats['extracted'] > 0:
-		print('Total extracted functions: %d/%d (%.02f%%)' % (stats['extracted'], stats['total'], (float(stats['extracted']) / stats['total'] * 100)))
+	print('Extracted indirect jumps: %d' % stats['indirect_control_transfers']['jumps'])
+	print('Extracted indirect calls: %d' % stats['indirect_control_transfers']['calls'])
+	if stats['function_entries']['extracted'] > 0:
+		print('Extracted functions: %d/%d (%.02f%%)' % (stats['function_entries']['extracted'], \
+			stats['function_entries']['total'], (float(stats['function_entries']['extracted']) / stats['function_entries']['total'] * 100)))
 	else:
-		print('No functions extracted')
+		print('Extracted functions: none')
 
 if __name__ == '__main__':
 	parser = argparse.ArgumentParser(description='Analyze binary with objdump')

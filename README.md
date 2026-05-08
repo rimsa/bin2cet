@@ -86,15 +86,6 @@ Install the following prerequisities:
 
 ## Troubleshooting
 
-If python is unable to execute the ```match``` command, it is because of your python version is too old. Please use python >= 3.10.
+bin2cet supports patching specific strategies, such as indirect branch targets, indirect jumps, or indirect calls. If you want to patch just indirect branch targets, use ```--strategies indirect_branch_target```, or just indirect calls, use ```--strategies indirect_call```. Use ```--help``` for other options.
 
-        $ python3 bin2cet.py ...
-          File "bin2cet.py", line 137
-            match patch['patch_type']:
-                  ^
-
-        SyntaxError: invalid syntax
-
-bin2cet supports patching only function entries or indirect jumps. If you want to patch only function entries, use the ```--strategies target_address```. Use ```--help``` for other options.
-
-        $ python3 bin2cet.py --strategies target_address ...
+        $ python3 bin2cet.py --strategies indirect_branch_target ...

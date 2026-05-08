@@ -46,28 +46,35 @@ def get_addr_content(addr):
 	content = list(listing.getCodeUnitAt(addr).getBytes())
 	return [val if val >= 0 else (val + 256) for val in content]
 
-def is_instr_indirect_jump(instr):
-	return instr.getMnemonicString() == 'JMP' and \
-			any(pcode.getOpcode() == PcodeOp.BRANCHIND for pcode in instr.getPcode())
+def is_instr_indirect(instr):
+	return (instr.getMnemonicString() == 'JMP' and \
+			any(pcode.getOpcode() == PcodeOp.BRANCHIND for pcode in instr.getPcode())) or \
+			(instr.getMnemonicString() == 'CALL' and \
+			any(pcode.getOpcode() == PcodeOp.CALLIND for pcode in instr.getPcode()))
 
 def is_instr_direct_divert_flow(instr):
 	for pcode in instr.getPcode():
 		if pcode.getOpcode() == PcodeOp.BRANCH or \
 			pcode.getOpcode() == PcodeOp.CBRANCH or \
+			pcode.getOpcode() == PcodeOp.BRANCHIND or \
+			pcode.getOpcode() == PcodeOp.CALL or \
+			pcode.getOpcode() == PcodeOp.CALLOTHER or \
+			pcode.getOpcode() == PcodeOp.CALLIND or \
 			pcode.getOpcode() == PcodeOp.RETURN:
 			return True
 	return False
 
-def extract_indirect_jump(instr):
+def extract_indirect_control_transfer(instr):
 	addr = instr.getAddress()
 
 	section = memory.getBlock(addr)
 	if not section:
 		return None
 
+	ptype = 'indirect_jump' if 'JMP' in instr.toString() else 'indirect_call'
 	return {
 		'addr': hex(get_relative_addr(addr)),
-		'patch_type': 'indirect_jump',
+		'patch_type': ptype,
 		'data': {
 			'section': section.getName(),
 			'section_offset': addr.subtract(section.getStart()),
@@ -106,34 +113,22 @@ def extract_function_entry(instr, fun):
 		content = get_addr_content(addr)
 		instructions.append({
 			'content': content,
-			'asm': current.toString(),
-			'relative': True,
-			'indirect': is_instr_indirect_jump(current)
+			'asm': current.toString()
 		})
 		size += len(content)
 		current = current.getNext()
-
-	# The next instruction will be patched too,
-	# but there is no need to check if it belongs
-	# to the current basic block, since this
-	# instruction will be replaced by e9patch.
-	# Only check if it may diverge flow:
-	if is_instr_direct_divert_flow(current):
-		return None
 
 	addr = current.getAddress()
 	blacklist.add(addr)
 	instructions.append({
 		'content': get_addr_content(addr),
-		'asm': current.toString(),
-		'relative': True,
-		'indirect': is_instr_indirect_jump(current)
+		'asm': current.toString()
 	})
 
 	addrs_blacklist.update(blacklist)
 	return {
 		'addr': hex(get_relative_addr(entry_addr)),
-		'patch_type': 'target_address',
+		'patch_type': 'indirect_branch_target',
 		'data': {
 			'section': section.getName(),
 			'section_offset': entry_addr.subtract(section.getStart()),
@@ -151,25 +146,35 @@ ext = args[0] if len(args) == 1 else 'json'
 
 patches = []
 stats = {
-	'extracted': 0,
-	'total': 0
+	'indirect_control_transfers': {
+		'jumps': 0,
+		'calls': 0,
+	},
+	'function_entries': {
+		'extracted': 0,
+		'total': 0
+	}
 }
 
 for instr in listing.getInstructions(True):
 	if instr.getAddress() in addrs_blacklist:
 		continue
 
-	if is_instr_indirect_jump(instr):
-		dump = extract_indirect_jump(instr)
+	if is_instr_indirect(instr):
+		dump = extract_indirect_control_transfer(instr)
 		if dump:
+			if dump['patch_type'] == 'indirect_jump':
+				stats['indirect_control_transfers']['jumps'] += 1
+			else:
+				stats['indirect_control_transfers']['calls'] += 1
 			patches.append(dump)
 	else:
 		fun = funmanager.getFunctionAt(instr.getAddress())
 		if fun and instr.getMnemonicString() != 'ENDBR64':
-			stats['total'] += 1
+			stats['function_entries']['total'] += 1
 			dump = extract_function_entry(instr, fun)
 			if dump:
-				stats['extracted'] += 1
+				stats['function_entries']['extracted'] += 1
 				patches.append(dump)
 			else:
 				print('Failed to extract function: %s' % fun.getName())
@@ -179,7 +184,10 @@ outfile = currentProgram.getExecutablePath() + '.' + ext
 with open(outfile, 'w') as json_file:
     json.dump(patches, json_file, indent=2)
 
-if stats['extracted'] > 0:
-	print('Total extracted functions: %d/%d (%.02f%%)' % (stats['extracted'], stats['total'], (float(stats['extracted']) / stats['total'] * 100)))
+print('Extracted indirect jumps: %d' % stats['indirect_control_transfers']['jumps'])
+print('Extracted indirect calls: %d' % stats['indirect_control_transfers']['calls'])
+if stats['function_entries']['extracted'] > 0:
+	print('Extracted functions: %d/%d (%.02f%%)' % (stats['function_entries']['extracted'], \
+		stats['function_entries']['total'], (float(stats['function_entries']['extracted']) / stats['function_entries']['total'] * 100)))
 else:
-	print('No functions extracted')
+	print('Extracted functions: none')

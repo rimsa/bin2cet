@@ -34,12 +34,12 @@ analysis = []
 
 def apply_lief(input_name, output_name):
     if verbose:
-        print("[+] Patching binary with lief")
+        print('[+] Patching binary with lief')
 
     binary = lief.parse(input_name)
 
     if verbose:
-        print(f"[+] Adding section to enable CET (IBT and SHSTK)")
+        print('[+] Adding section to enable CET (IBT and SHSTK)')
 
     # Add section note to enable CET's IBT and SHSTK.
     propertysec = lief.ELF.Section('.note.gnu.property', lief.ELF.Section.TYPE.NOTE)
@@ -66,8 +66,9 @@ def apply_lief(input_name, output_name):
         if patch['patch_type'] not in strategies:
             continue
 
-        # At this phase, we will only patch function entries.
-        if patch['patch_type'] != 'target_address':
+        # At this phase, we will only patch indirect branch targets
+        # (not indirect jumps or indirect calls).
+        if patch['patch_type'] != 'indirect_branch_target':
             continue
 
         # For now, we only support patching the text section.
@@ -93,9 +94,9 @@ def apply_lief(input_name, output_name):
             addr = hex(int(re.sub(r'L$', '', patch['addr']),16)+addr_shift)
             asms = ' ; '.join(instr['asm'] for instr in instructions)
             plural = 's' if len(instructions) > 1 else ''
-            print(f"[+] Replacing the \"{asms}\" instruction{plural} at {addr} with endbr64")
+            print(f'[+] Replacing the "{asms}" instruction{plural} at {addr} with endbr64')
 
-        # Patch the function entry with ENDB64 and NOPs.
+        # Patch the indirect branch target with ENDB64 and NOPs (if necessary).
         new_text[section_offset:section_offset+len(ENDBR64)] = ENDBR64
         for idx in range(len(ENDBR64),size):
             new_text[section_offset+idx] = NOP
@@ -104,28 +105,29 @@ def apply_lief(input_name, output_name):
     section.content = new_text
 
     if verbose:
-        print(f"[+] Writing ouput to: {output_name}")
+        print(f'[+] Writing ouput to: {output_name}')
 
     binary.write(output_name)
 
 def apply_e9patch(input_name, output_rpc, output_name):
     if verbose:
         print('[+] Patching binary with e9patch')
-        print(f"[+] Generating rpc file: {output_rpc}")
+        print(f'[+] Generating rpc file: {output_rpc}')
 
     id = 0
     trampolin = 0
     patch_count = 0
     with open(output_rpc, 'w') as rpc_file:
-        rpc_file.write(f"{{\"jsonrpc\":\"2.0\",\"method\":\"binary\",\"params\":{{\"version\":\"1.0.0\",\"filename\":\"{input_name}\",\"mode\":\"elf.exe\"}},\"id\":{id}}}\n")
+        rpc_file.write(f'{{"jsonrpc":"2.0","method":"binary","params":{{"version":"1.0.0","filename":"{input_name}","mode":"elf.exe"}},"id":{id}}}\n')
         id += 1
 
         debug = '"--trap-all",' if args.debug else ''
-        rpc_file.write(f"{{\"jsonrpc\":\"2.0\",\"method\":\"options\",\"params\":{{\"argv\":[{debug}\"-Oprologue=0\",\"-Oprologue-size=0\",\"-Oepilogue=32\",\"-Oepilogue-size=64\",\"-Oorder=true\",\"-Opeephole=true\",\"-Oscratch-stack=true\",\"--mem-granularity=128\"]}},\"id\":{id}}}\n")
+        rpc_file.write(f'{{"jsonrpc":"2.0","method":"options","params":{{"argv":[{debug}"-Oprologue=0","-Oprologue-size=0","-Oepilogue=32","-Oepilogue-size=64","-Oorder=true","-Opeephole=true","-Oscratch-stack=true","--mem-granularity=128"]}},"id":{id}}}\n')
         id += 1
 
-        rpc_file.write(f"{{\"jsonrpc\":\"2.0\",\"method\":\"trampoline\",\"params\":{{\"name\":\"$notrack\",\"template\":[62,\"$instr\"]}},\"id\":{id}}}\n")
-        id += 1
+        if any(s in strategies for s in ['indirect_jump', 'indirect_call']):
+            rpc_file.write(f'{{"jsonrpc":"2.0","method":"trampoline","params":{{"name":"$notrack","template":["$instr"]}},"id":{id}}}\n')
+            id += 1
 
         for patch in sorted(analysis, key=lambda x: int(re.sub(r'L$', '', x['addr']),16), reverse=True):
             addr = hex(int(re.sub(r'L$', '', patch['addr']),16)+addr_shift)
@@ -140,18 +142,18 @@ def apply_e9patch(input_name, output_rpc, output_name):
 
             match patch['patch_type']:
                 # Add the notrack flag to the indirect jump.
-                case 'indirect_jump':
+                case 'indirect_jump'|'indirect_call':
                     size = len(patch['data']['instruction']['content'])
                     assert size > 0
 
-                    rpc_file.write(f"{{\"jsonrpc\":\"2.0\",\"method\":\"instruction\",\"params\":{{\"address\":\"{addr}\",\"length\":{size},\"offset\":{offset}}},\"id\":{id}}}\n")
+                    rpc_file.write(f'{{"jsonrpc":"2.0","method":"instruction","params":{{"address":"{addr}","length":{size},"offset":{offset}}},"id":{id}}}\n')
                     id += 1
 
-                    rpc_file.write(f"{{\"jsonrpc\":\"2.0\",\"method\":\"patch\",\"params\":{{\"trampoline\":\"$notrack\",\"offset\":{offset}}},\"id\":{id}}}\n")
+                    rpc_file.write(f'{{"jsonrpc":"2.0","method":"patch","params":{{"trampoline":"$notrack","offset":{offset}}},"id":{id}}}\n')
                     id += 1
                 # Patch the next instruction after the endbr64 (and pads)
                 # added by lief.
-                case 'target_address':
+                case 'indirect_branch_target':
                     instructions = patch['data']['instructions']
                     last = instructions.pop()
 
@@ -162,13 +164,7 @@ def apply_e9patch(input_name, output_rpc, output_name):
                         bytes = str(instr['content']).replace(' ', '')[1:-1]
                         assert len(bytes) > 0
 
-                        if instr['indirect']:
-                            bytes = '62,' + bytes
-
-                        if instr['relative']:
-                            content += f'{{"reloc":[{bytes}],"addr":"{hex(current_addr)}"}},'
-                        else:
-                            content += bytes + ','
+                        content += f'{{"reloc":[{bytes}],"addr":"{hex(current_addr)}"}},'
                         size += len(instr['content'])
                         current_addr += len(instr['content'])
                     assert len(content) > 0
@@ -177,13 +173,13 @@ def apply_e9patch(input_name, output_rpc, output_name):
                     last_size = len(last['content'])
                     assert last_size > 0
 
-                    rpc_file.write(f"{{\"jsonrpc\":\"2.0\",\"method\":\"trampoline\",\"params\":{{\"name\":\"$trampolin{trampolin}\",\"template\":[{content}\"$instr\",\"$BREAK\"]}},\"id\":{id}}}\n")
+                    rpc_file.write(f'{{"jsonrpc":"2.0","method":"trampoline","params":{{"name":"$trampolin{trampolin}","template":[{content}"$instr","$BREAK"]}},"id":{id}}}\n')
                     id += 1
 
-                    rpc_file.write(f"{{\"jsonrpc\":\"2.0\",\"method\":\"instruction\",\"params\":{{\"address\":\"{hex(current_addr)}\",\"length\":{last_size},\"offset\":{last_offset}}},\"id\":{id}}}\n")
+                    rpc_file.write(f'{{"jsonrpc":"2.0","method":"instruction","params":{{"address":"{hex(current_addr)}","length":{last_size},"offset":{last_offset}}},"id":{id}}}\n')
                     id += 1
 
-                    rpc_file.write(f"{{\"jsonrpc\":\"2.0\",\"method\":\"patch\",\"params\":{{\"trampoline\":\"$trampolin{trampolin}\",\"offset\":{last_offset}}},\"id\":{id}}}\n")
+                    rpc_file.write(f'{{"jsonrpc":"2.0","method":"patch","params":{{"trampoline":"$trampolin{trampolin}","offset":{last_offset}}},"id":{id}}}\n')
                     id += 1
                     trampolin += 1
                 case _:
@@ -191,11 +187,11 @@ def apply_e9patch(input_name, output_rpc, output_name):
 
             patch_count += 1
 
-        rpc_file.write(f"{{\"jsonrpc\":\"2.0\",\"method\":\"emit\",\"params\":{{\"filename\":\"{output_name}\",\"format\":\"binary\"}},\"id\":{id}}}\n")
+        rpc_file.write(f'{{"jsonrpc":"2.0","method":"emit","params":{{"filename":"{output_name}","format":"binary"}},"id":{id}}}\n')
         id += 1
 
     if verbose:
-        print(f"[+] Executing e9patch with generated {output_rpc}")
+        print(f'[+] Executing e9patch with generated {output_rpc}')
 
     with open(output_rpc, 'r') as rpc_file:
         cmd = ["e9patch"]
@@ -205,7 +201,7 @@ def apply_e9patch(input_name, output_rpc, output_name):
             print('[+] Output of e9patch')
             print(result.stdout)
 
-        match = re.search(rf"num_patched\s*=\s*\d+\s*/\s*{patch_count}\s*\((.*%)\)", result.stdout)
+        match = re.search(rf'num_patched\s*=\s*\d+\s*/\s*{patch_count}\s*\((.*%)\)', result.stdout)
         if not match:
             raise SystemExit('Unable to match patched instructions')
 
@@ -214,14 +210,14 @@ def apply_e9patch(input_name, output_rpc, output_name):
             raise SystemExit(f'Patched only {rate} of the instructions')
 
     if verbose:
-        print(f"[+] Writing ouput to: {output_name}")
+        print(f'[+] Writing ouput to: {output_name}')
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Convert binary to CET')
     parser.add_argument('--debug', dest='debug', action='store_true', help='Allow for debugging with GDB')
     parser.add_argument('--keep', dest='keep', action='store_true', help='Keep temporary files')
     parser.add_argument('--verbose', dest='verbose', action='store_true', help='Verbose mode')
-    parser.add_argument('--strategies', dest='strategies', type=str, default='target_address,indirect_jump', help='Patching strategies (default: %(default)s)')
+    parser.add_argument('--strategies', dest='strategies', type=str, default='indirect_branch_target,indirect_jump', help='Patching strategies: indirect_branch_target|indirect_jump|indirect_call (default: %(default)s)')
     parser.add_argument('input_binary', metavar='input-binary', help='Input binary')
     parser.add_argument('analysis', metavar='analysis', help='Analysis')
     parser.add_argument('output_binary', metavar='output-binary', help='Output binary')
@@ -232,7 +228,7 @@ if __name__ == "__main__":
 
     strategies = [s.strip() for s in args.strategies.split(',')]
     for s in strategies:
-        if s not in ['target_address', 'indirect_jump']:
+        if s not in ['indirect_branch_target', 'indirect_jump', 'indirect_call']:
             raise SystemExit(f'Unknown patching strategy: {s}')
 
     analysis = []
@@ -247,9 +243,9 @@ if __name__ == "__main__":
 
     if not keep_tmp:
         if verbose:
-            print(f"[+] Removing temporaries")
+            print('[+] Removing temporaries')
         os.remove(tmp_file)
         os.remove(rpc_file)
 
     if verbose:
-        print(f"[+] Everything done")
+        print('[+] Everything done')

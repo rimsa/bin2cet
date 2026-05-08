@@ -1,18 +1,18 @@
 diff -urN a/src/e9patch/e9elf.cpp b/src/e9patch/e9elf.cpp
---- a/src/e9patch/e9elf.cpp	2026-03-27 11:04:00.907671964 -0300
-+++ b/src/e9patch/e9elf.cpp	2026-03-27 11:09:21.034971251 -0300
-@@ -662,6 +662,8 @@ size_t emitElf(Binary *B, const MappingSet &mappings, size_t mapping_size)
-         data[size++] = 0x00;
+--- a/src/e9patch/e9elf.cpp	2026-05-08 18:25:28
++++ b/src/e9patch/e9elf.cpp	2026-05-12 16:50:45
+@@ -662,6 +662,8 @@
      }
-
+ 
      intptr_t entry = (option_loader_base + (size - config_offset));
 +    // endbr64
 +    data[size++] = 0xf3; data[size++] = 0x0f; data[size++] = 0x1e; data[size++] = 0xfa;
      if (option_trap_entry)
          data[size++] = /*int3=*/0xCC;
+     // push %rdi,%rsi,%rdx
 diff -urN a/src/e9patch/e9loader_elf.cpp b/src/e9patch/e9loader_elf.cpp
---- a/src/e9patch/e9loader_elf.cpp	2026-03-27 11:04:00.907671964 -0300
-+++ b/src/e9patch/e9loader_elf.cpp	2026-03-27 11:07:50.892911682 -0300
+--- a/src/e9patch/e9loader_elf.cpp	2026-05-08 18:25:28
++++ b/src/e9patch/e9loader_elf.cpp	2026-05-12 16:50:45
 @@ -78,12 +78,12 @@
      "\tpop %rdx\n"
      "\tpop %rsi\n"
@@ -38,8 +38,8 @@ diff -urN a/src/e9patch/e9loader_elf.cpp b/src/e9patch/e9loader_elf.cpp
      __builtin_unreachable();
  }
 diff -urN a/src/e9patch/e9loader_pe.cpp b/src/e9patch/e9loader_pe.cpp
---- a/src/e9patch/e9loader_pe.cpp	2026-03-27 11:04:00.907671964 -0300
-+++ b/src/e9patch/e9loader_pe.cpp	2026-03-27 11:05:50.878174337 -0300
+--- a/src/e9patch/e9loader_pe.cpp	2026-05-08 18:25:28
++++ b/src/e9patch/e9loader_pe.cpp	2026-05-12 16:50:45
 @@ -281,7 +281,7 @@
      "\tpop %rdx\n"
      "\tpop %rcx\n"
@@ -50,8 +50,8 @@ diff -urN a/src/e9patch/e9loader_pe.cpp b/src/e9patch/e9loader_pe.cpp
      ".section .text\n"
  );
 diff -urN a/src/e9patch/e9patch.cpp b/src/e9patch/e9patch.cpp
---- a/src/e9patch/e9patch.cpp	2026-03-27 11:04:00.907671964 -0300
-+++ b/src/e9patch/e9patch.cpp	2026-03-27 11:05:39.549916280 -0300
+--- a/src/e9patch/e9patch.cpp	2026-05-08 18:25:28
++++ b/src/e9patch/e9patch.cpp	2026-05-12 16:50:45
 @@ -926,7 +926,7 @@
      "movabs $(realMain-main)-0x14159265, %rax\n"
      "leaq main+0x6b1db77(%rip), %rbp\n"
@@ -70,9 +70,69 @@ diff -urN a/src/e9patch/e9patch.cpp b/src/e9patch/e9patch.cpp
      ".Lskip:\n"
  );
  
+diff -urN a/src/e9patch/e9x86_64.cpp b/src/e9patch/e9x86_64.cpp
+--- a/src/e9patch/e9x86_64.cpp	2026-05-08 18:25:28
++++ b/src/e9patch/e9x86_64.cpp	2026-05-12 16:50:45
+@@ -292,11 +292,14 @@
+ 
+     uint8_t rex = 0;
+     bool addr32 = false;
++    bool indjmp = false;
+     int i = decodePrefix(bytes, size, rex, addr32);
+     if (i < 0)
+     {
+         // Instruction is not PC-relative:
+ no_modification_necessary:
++        if (indjmp)
++            buf->push(0x3E); // notrack marker.
+         buf->push(bytes, size);
+         return buf->commit(start);
+     }
+@@ -328,6 +331,7 @@
+ 
+                     // Convert the call into a jmp if necessary:
+                     size_t buf_size = buf->size(start);
++                    buf->push(0x3E); // notrack marker.
+                     buf->push(bytes, i);
+                     if (!option_Ocall)
+                         modRM = (modRM & ~0x38) | (0x04 << 3);  // jmp op
+@@ -403,7 +407,8 @@
+                         int32_t pcrel32 = *(uint32_t *)(bytes + i + 1);
+                         intptr_t target = addr + size + (intptr_t)pcrel32;
+                         intptr_t diff   = target -
+-                            (addr + offset + buf_size + size);
++                            (addr + offset + buf_size + size +
++                            /*sizeof(notrack)=*/1);
+                         if (!relax && (diff < INT32_MIN || diff > INT32_MAX))
+                             return -1;
+                         int32_t diff32  = (int32_t)diff;
+@@ -415,6 +420,9 @@
+                         buf->push(bytes + i + 1, size - i - 1);
+                     return buf->commit(start);
+                 }
++                case 0x04:              // JMPQ*
++                    indjmp = true;
++                    break;
+                 default:
+                     break;
+             }
+@@ -601,10 +609,12 @@
+         // i points to a %rip-relative displacement.  We adjust accordingly.
+         int32_t pcrel32 = *(uint32_t *)(bytes + i);
+         intptr_t target = addr + size + (intptr_t)pcrel32;
+-        intptr_t diff   = target - (addr + offset + buf->size(start) + size);
++        intptr_t diff   = target - (addr + offset + buf->size(start) + size + (indjmp ? 1 : 0));
+         if (diff < INT32_MIN || diff > INT32_MAX)
+             return -1;
+         int32_t diff32  = (int32_t)diff;
++        if (indjmp)
++            buf->push(0x3E); // notrack marker.
+         buf->push(bytes, i);
+         buf->push((const uint8_t *)&diff32, sizeof(diff32));
+         buf->push(bytes + i + sizeof(diff32), size - i - sizeof(diff32));
 diff -urN a/src/e9tool/e9frontend.cpp b/src/e9tool/e9frontend.cpp
---- a/src/e9tool/e9frontend.cpp	2026-03-27 11:04:00.911672055 -0300
-+++ b/src/e9tool/e9frontend.cpp	2026-03-27 11:06:25.638966554 -0300
+--- a/src/e9tool/e9frontend.cpp	2026-05-08 18:25:28
++++ b/src/e9tool/e9frontend.cpp	2026-05-12 16:50:45
 @@ -1980,9 +1980,9 @@
              fprintf(out, "%u,", (result_rax? 0x58: 0x59));
              fprintf(out, "\"$RSTOR_RSP@%s\",", patch);
