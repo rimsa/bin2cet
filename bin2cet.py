@@ -32,7 +32,7 @@ pie = False
 addr_shift = 0
 analysis = []
 
-def apply_lief(input_name, output_name):
+def apply_lief(input_name, ignores, output_name):
     if verbose:
         print('[+] Patching binary with lief')
 
@@ -75,6 +75,21 @@ def apply_lief(input_name, output_name):
         if patch['data']['section'] != '.text':
             continue
 
+        # Get the address from the json.
+        addr = int(re.sub(r'L?$', '', patch['addr']),16)
+
+        # Check if the address is on the ignore list.
+        if addr in ignores['addresses']:
+            continue
+
+        # Also, check if the function is on the ignore list.
+        if 'function' in patch['data'] and \
+            patch['data']['function'] in ignores['functions']:
+            continue
+
+        # Shift the address if a new section was added.
+        addr = hex(addr+addr_shift)
+
         # Check if we are within section bounds.
         section_offset = patch['data']['section_offset']
         assert section_offset >= 0 and section_offset < section.size
@@ -91,7 +106,6 @@ def apply_lief(input_name, output_name):
         assert data1 == data2
 
         if verbose:
-            addr = hex(int(re.sub(r'L$', '', patch['addr']),16)+addr_shift)
             asms = ' ; '.join(instr['asm'] for instr in instructions)
             plural = 's' if len(instructions) > 1 else ''
             print(f'[+] Replacing the "{asms}" instruction{plural} at {addr} with endbr64')
@@ -109,7 +123,7 @@ def apply_lief(input_name, output_name):
 
     binary.write(output_name)
 
-def apply_e9patch(input_name, output_rpc, output_name):
+def apply_e9patch(input_name, output_rpc, ignores, output_name):
     if verbose:
         print('[+] Patching binary with e9patch')
         print(f'[+] Generating rpc file: {output_rpc}')
@@ -129,16 +143,29 @@ def apply_e9patch(input_name, output_rpc, output_name):
             rpc_file.write(f'{{"jsonrpc":"2.0","method":"trampoline","params":{{"name":"$notrack","template":["$instr"]}},"id":{id}}}\n')
             id += 1
 
-        for patch in sorted(analysis, key=lambda x: int(re.sub(r'L$', '', x['addr']),16), reverse=True):
-            addr = hex(int(re.sub(r'L$', '', patch['addr']),16)+addr_shift)
+        for patch in sorted(analysis, key=lambda x: int(re.sub(r'L?$', '', x['addr']),16), reverse=True):
+            # Ignore patch type if not a valid strategy.
+            if patch['patch_type'] not in strategies:
+                continue
+
+            # Get the address from the json.
+            addr = int(re.sub(r'L?$', '', patch['addr']),16)
+
+            # Check if the address is on the ignore list.
+            if addr in ignores['addresses']:
+                continue
+
+            # Also, check if the function is on the ignore list.
+            if 'function' in patch['data'] and \
+                patch['data']['function'] in ignores['functions']:
+                continue
+
+            # Shift the address if a new section was added.
+            addr = hex(addr+addr_shift)
 
             offset = patch['data']['file_offset']
             assert offset >= 0
             offset += addr_shift
-
-            # Ignore patch type if not a valid strategy.
-            if patch['patch_type'] not in strategies:
-                continue
 
             match patch['patch_type']:
                 # Add the notrack flag to the indirect jump.
@@ -159,7 +186,7 @@ def apply_e9patch(input_name, output_rpc, output_name):
 
                     content = ''
                     size = 0
-                    current_addr = int(re.sub(r'L$', '', patch['addr']),16)+addr_shift
+                    current_addr = int(re.sub(r'L?$', '', patch['addr']),16)+addr_shift
                     for instr in instructions:
                         bytes = str(instr['content']).replace(' ', '')[1:-1]
                         assert len(bytes) > 0
@@ -218,6 +245,8 @@ if __name__ == "__main__":
     parser.add_argument('--keep', dest='keep', action='store_true', help='Keep temporary files')
     parser.add_argument('--verbose', dest='verbose', action='store_true', help='Verbose mode')
     parser.add_argument('--strategies', dest='strategies', type=str, default='indirect_branch_target,indirect_jump', help='Patching strategies: indirect_branch_target|indirect_jump|indirect_call (default: %(default)s)')
+    parser.add_argument('--ignore-addresses', dest='ign_addrs', type=str, default='', help='Ignore comma-separated patch addresses')
+    parser.add_argument('--ignore-functions', dest='ign_funcs', type=str, default='', help='Ignore comma-separated patch function names')
     parser.add_argument('input_binary', metavar='input-binary', help='Input binary')
     parser.add_argument('analysis', metavar='analysis', help='Analysis')
     parser.add_argument('output_binary', metavar='output-binary', help='Output binary')
@@ -231,6 +260,11 @@ if __name__ == "__main__":
         if s not in ['indirect_branch_target', 'indirect_jump', 'indirect_call']:
             raise SystemExit(f'Unknown patching strategy: {s}')
 
+    ignores = {
+        'addresses': [int(s.strip(),0) for s in args.ign_addrs.split(',') if s],
+        'functions': [s.strip() for s in args.ign_funcs.split(',') if s]
+    }
+
     analysis = []
     with open(args.analysis) as json_file:
         analysis = json.load(json_file)
@@ -238,8 +272,8 @@ if __name__ == "__main__":
     tmp_file = args.input_binary+'.tmp'
     rpc_file = args.input_binary+'.rpc'
 
-    apply_lief(args.input_binary, tmp_file)
-    apply_e9patch(tmp_file, rpc_file, args.output_binary)
+    apply_lief(args.input_binary, ignores, tmp_file)
+    apply_e9patch(tmp_file, rpc_file, ignores, args.output_binary)
 
     if not keep_tmp:
         if verbose:
